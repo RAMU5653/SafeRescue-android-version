@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "SafeRescue - Emergency Safety Platform",
+  "short_name": "SafeRescue",
+  "description": "Local-first emergency safety platform featuring 5-second hold SOS activation, real-time risk assessment, live audio metrics, camera evidence capture, and nearby safety guidance.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#050D20",
+  "theme_color": "#050D20",
+  "icons": [
+    {
+      "src": "/saferescue_logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/saferescue_logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+.gradle/
+.idea/
+*.iml
+local.properties
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+.DS_Store
+keystore.properties
+*.jks
+*.keystore
+
+# Android / Gradle generated files
+.gradle/
+build/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# APK/AAB outputs
+*.apk
+*.aab

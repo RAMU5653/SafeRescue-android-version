@@ -1,0 +1,6 @@
+{
+  "name": "SafeRescue",
+  "description": "Local-first emergency safety platform featuring 5-second hold SOS activation, real-time risk assessment, live audio metrics, camera evidence capture, trusted contacts, nearby safety guidance, and incident reports.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
