@@ -125,3 +125,6 @@ Final UI design-system polish: centralized Material 3 colors, typography and sha
 Release configuration is versioned as **1.0.0 / versionCode 18**. Production signing is intentionally external and no private key is stored in this repository. Run `bash tools/release_preflight.sh` before a real release build. See `docs/PHASE_26.md` for signing, artifact verification, and production security gates.
 
 - Lock-screen emergency access: Android-supported notification action opens a secure lock-screen SOS surface; it never unlocks the device.
+
+<img width="752" height="846" alt="Screenshot 2026-09-22 132607" src="https://github.com/user-attachments/assets/fb0d21d6-24d8-4bd7-b2c1-cdbaffe465cb" />
+
