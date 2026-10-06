@@ -1,0 +1,2 @@
+[functions.google-places]
+verify_jwt = true

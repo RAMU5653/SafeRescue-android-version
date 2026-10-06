@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import L from 'leaflet';
 import { LocationPoint, SafetyPlace, UnsafeZone } from '../types';
-import { Shield, AlertTriangle, Navigation, MapPin, Compass, ExternalLink } from 'lucide-react';
+import { Shield, AlertTriangle, Navigation, Compass, ExternalLink } from 'lucide-react';
+import { loadGoogleMaps } from '../lib/googleMaps';
 
 interface InteractiveSafeMapProps {
   location: LocationPoint | null;
@@ -15,6 +15,23 @@ interface InteractiveSafeMapProps {
   } | null;
 }
 
+interface SelectedEntity {
+  type: 'user' | 'safe' | 'unsafe';
+  title: string;
+  detail: string;
+  distance?: number;
+  category?: string;
+  lat: number;
+  lng: number;
+}
+
+const CATEGORY_COLORS: Record<string, string> = {
+  police: '#2563EB',
+  hospital: '#DC2626',
+  fire_station: '#F59E0B',
+  public_safe: '#10B981',
+};
+
 export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
   location,
   safePlaces,
@@ -22,85 +39,148 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
   recommendedEscapeRoute,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
-  const mapInstanceRef = useRef<L.Map | null>(null);
-  const layerGroupRef = useRef<L.LayerGroup | null>(null);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<google.maps.Marker[]>([]);
+  const circlesRef = useRef<google.maps.Circle[]>([]);
+  const userMarkerRef = useRef<google.maps.Marker | null>(null);
+  const userCircleRef = useRef<google.maps.Circle | null>(null);
+  const routeLineRef = useRef<google.maps.Polyline | null>(null);
+  const apiKeyRef = useRef<string>('');
 
-  const [selectedEntity, setSelectedEntity] = useState<{
-    type: 'user' | 'safe' | 'unsafe';
-    title: string;
-    detail: string;
-    distance?: number;
-    category?: string;
-    lat: number;
-    lng: number;
-  } | null>(null);
-
+  const [selectedEntity, setSelectedEntity] = useState<SelectedEntity | null>(null);
   const [filterMode, setFilterMode] = useState<'all' | 'safe' | 'unsafe'>('all');
+  const [mapReady, setMapReady] = useState(false);
+  const [mapError, setMapError] = useState<string | null>(null);
 
   const defaultLat = location?.latitude || 37.7749;
   const defaultLng = location?.longitude || -122.4194;
 
+  // Initialize Google Map
   useEffect(() => {
     if (!mapContainerRef.current) return;
 
-    if (!mapInstanceRef.current) {
-      const map = L.map(mapContainerRef.current, {
-        center: [defaultLat, defaultLng],
-        zoom: 15,
-        zoomControl: false,
-      });
+    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+    apiKeyRef.current = apiKey;
 
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors',
-        maxZoom: 19,
-      }).addTo(map);
-
-      // Zoom control in bottom right
-      L.control.zoom({ position: 'bottomright' }).addTo(map);
-
-      mapInstanceRef.current = map;
-      layerGroupRef.current = L.layerGroup().addTo(map);
+    if (!apiKey) {
+      setMapError('Google Maps API key is not configured. Set VITE_GOOGLE_MAPS_API_KEY in your environment.');
+      return;
     }
 
+    let cancelled = false;
+
+    loadGoogleMaps(apiKey)
+      .then(() => {
+        if (cancelled || !mapContainerRef.current) return;
+        if (!window.google?.maps) {
+          setMapError('Google Maps failed to initialize.');
+          return;
+        }
+
+        const map = new window.google.maps.Map(mapContainerRef.current, {
+          center: { lat: defaultLat, lng: defaultLng },
+          zoom: 15,
+          zoomControl: true,
+          zoomControlOptions: {
+            position: window.google.maps.ControlPosition.RIGHT_BOTTOM,
+          },
+          streetViewControl: false,
+          mapTypeControl: false,
+          fullscreenControl: false,
+          styles: [
+            { elementType: 'geometry', stylers: [{ color: '#0d1117' }] },
+            { elementType: 'labels.text.stroke', stylers: [{ color: '#0d1117' }] },
+            { elementType: 'labels.text.fill', stylers: [{ color: '#8E9BB6' }] },
+            { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#1a2235' }] },
+            { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#6B7B94' }] },
+            { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0a1428' }] },
+            { featureType: 'landscape', elementType: 'geometry', stylers: [{ color: '#101828' }] },
+            { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#141d30' }] },
+            { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#141d30' }] },
+            { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#1a2235' }] },
+          ],
+        });
+
+        mapRef.current = map;
+        setMapReady(true);
+      })
+      .catch((err) => {
+        setMapError(err.message || 'Failed to load Google Maps.');
+      });
+
     return () => {
-      if (mapInstanceRef.current) {
-        mapInstanceRef.current.remove();
-        mapInstanceRef.current = null;
-        layerGroupRef.current = null;
+      cancelled = true;
+      markersRef.current.forEach((m) => m.setMap(null));
+      markersRef.current = [];
+      circlesRef.current.forEach((c) => c.setMap(null));
+      circlesRef.current = [];
+      if (userMarkerRef.current) {
+        userMarkerRef.current.setMap(null);
+        userMarkerRef.current = null;
       }
+      if (userCircleRef.current) {
+        userCircleRef.current.setMap(null);
+        userCircleRef.current = null;
+      }
+      if (routeLineRef.current) {
+        routeLineRef.current.setMap(null);
+        routeLineRef.current = null;
+      }
+      mapRef.current = null;
+      setMapReady(false);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Update markers and zones whenever location, places, or filters change
+  // Update markers when location/places/zones/filter change
   useEffect(() => {
-    const map = mapInstanceRef.current;
-    const layers = layerGroupRef.current;
-    if (!map || !layers) return;
-
-    layers.clearLayers();
+    const map = mapRef.current;
+    if (!map || !mapReady || !window.google?.maps) return;
 
     const curLat = location?.latitude || defaultLat;
     const curLng = location?.longitude || defaultLng;
+    const gmaps = window.google.maps;
 
-    // 1. Render User's Live Position Marker
-    const userMarker = L.circleMarker([curLat, curLng], {
-      radius: 10,
-      fillColor: '#3B82F6',
-      color: '#FFFFFF',
-      weight: 3,
-      opacity: 1,
-      fillOpacity: 0.9,
+    // Clear previous markers and circles
+    markersRef.current.forEach((m) => m.setMap(null));
+    markersRef.current = [];
+    circlesRef.current.forEach((c) => c.setMap(null));
+    circlesRef.current = [];
+    if (routeLineRef.current) {
+      routeLineRef.current.setMap(null);
+      routeLineRef.current = null;
+    }
+
+    // 1. User position marker
+    if (userMarkerRef.current) userMarkerRef.current.setMap(null);
+    if (userCircleRef.current) userCircleRef.current.setMap(null);
+
+    userMarkerRef.current = new gmaps.Marker({
+      position: { lat: curLat, lng: curLng },
+      map,
+      title: 'Your Location',
+      icon: {
+        path: gmaps.SymbolPath.CIRCLE,
+        scale: 8,
+        fillColor: '#3B82F6',
+        fillOpacity: 1,
+        strokeColor: '#FFFFFF',
+        strokeWeight: 3,
+      },
     });
 
-    const userPulse = L.circle([curLat, curLng], {
+    userCircleRef.current = new gmaps.Circle({
+      center: { lat: curLat, lng: curLng },
       radius: location?.accuracyMeters ? Math.max(15, location.accuracyMeters) : 25,
-      color: '#3B82F6',
+      map,
       fillColor: '#60A5FA',
-      fillOpacity: 0.15,
-      weight: 1.5,
+      fillOpacity: 0.12,
+      strokeColor: '#3B82F6',
+      strokeOpacity: 0.5,
+      strokeWeight: 1.5,
     });
 
-    userMarker.on('click', () => {
+    userMarkerRef.current.addListener('click', () => {
       setSelectedEntity({
         type: 'user',
         title: 'You Are Here (Live Fix)',
@@ -110,30 +190,24 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
       });
     });
 
-    layers.addLayer(userPulse);
-    layers.addLayer(userMarker);
-
-    // 2. Render Unsafe Zones (Identified by Phi-3.5 Mini)
+    // 2. Unsafe zones
     if (filterMode === 'all' || filterMode === 'unsafe') {
       unsafeZones.forEach((zone) => {
         const isCritical = zone.riskSeverity === 'CRITICAL';
         const color = isCritical ? '#EF4444' : '#F59E0B';
 
-        const circle = L.circle([zone.latitude, zone.longitude], {
+        const circle = new gmaps.Circle({
+          center: { lat: zone.latitude, lng: zone.longitude },
           radius: zone.radiusMeters,
-          color,
+          map,
           fillColor: color,
-          fillOpacity: 0.22,
-          weight: 2,
-          dashArray: '4, 6',
+          fillOpacity: 0.18,
+          strokeColor: color,
+          strokeOpacity: 0.8,
+          strokeWeight: 2,
         });
 
-        circle.bindTooltip(`⚠️ ${zone.name} (${zone.riskSeverity})`, {
-          direction: 'top',
-          className: 'bg-zinc-900 text-white text-xs font-semibold px-2 py-1 rounded shadow',
-        });
-
-        circle.on('click', () => {
+        circle.addListener('click', () => {
           setSelectedEntity({
             type: 'unsafe',
             title: zone.name,
@@ -144,42 +218,57 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
           });
         });
 
-        layers.addLayer(circle);
+        circlesRef.current.push(circle);
 
-        // Center warning icon pin
-        const centerIcon = L.circleMarker([zone.latitude, zone.longitude], {
-          radius: 6,
-          fillColor: color,
-          color: '#FFFFFF',
-          weight: 2,
-          fillOpacity: 1,
+        const centerMarker = new gmaps.Marker({
+          position: { lat: zone.latitude, lng: zone.longitude },
+          map,
+          title: zone.name,
+          icon: {
+            path: gmaps.SymbolPath.CIRCLE,
+            scale: 5,
+            fillColor: color,
+            fillOpacity: 1,
+            strokeColor: '#FFFFFF',
+            strokeWeight: 2,
+          },
         });
 
-        layers.addLayer(centerIcon);
+        centerMarker.addListener('click', () => {
+          setSelectedEntity({
+            type: 'unsafe',
+            title: zone.name,
+            detail: zone.reason,
+            category: zone.riskSeverity,
+            lat: zone.latitude,
+            lng: zone.longitude,
+          });
+        });
+
+        markersRef.current.push(centerMarker);
       });
     }
 
-    // 3. Render Safe Places
+    // 3. Safe places
     if (filterMode === 'all' || filterMode === 'safe') {
       safePlaces.forEach((place) => {
-        const isPolice = place.category === 'police';
-        const isHospital = place.category === 'hospital';
-        const color = isPolice ? '#2563EB' : isHospital ? '#DC2626' : '#10B981';
+        const color = CATEGORY_COLORS[place.category] || '#10B981';
 
-        const placeMarker = L.circleMarker([place.latitude, place.longitude], {
-          radius: 8,
-          fillColor: color,
-          color: '#FFFFFF',
-          weight: 2,
-          fillOpacity: 0.9,
+        const marker = new gmaps.Marker({
+          position: { lat: place.latitude, lng: place.longitude },
+          map,
+          title: place.name,
+          icon: {
+            path: gmaps.SymbolPath.CIRCLE,
+            scale: 7,
+            fillColor: color,
+            fillOpacity: 0.9,
+            strokeColor: '#FFFFFF',
+            strokeWeight: 2,
+          },
         });
 
-        placeMarker.bindTooltip(`🛡️ ${place.name}`, {
-          direction: 'top',
-          className: 'bg-zinc-900 text-white text-xs font-bold px-2 py-1 rounded shadow',
-        });
-
-        placeMarker.on('click', () => {
+        marker.addListener('click', () => {
           setSelectedEntity({
             type: 'safe',
             title: place.name,
@@ -191,40 +280,43 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
           });
         });
 
-        layers.addLayer(placeMarker);
+        markersRef.current.push(marker);
       });
     }
 
-    // 4. If Recommended Escape Route exists, draw direct walking path
+    // 4. Escape route line
     if (recommendedEscapeRoute && safePlaces.length > 0) {
       const target = safePlaces[0];
-      const routeLine = L.polyline(
-        [
-          [curLat, curLng],
-          [target.latitude, target.longitude],
+      routeLineRef.current = new gmaps.Polyline({
+        path: [
+          { lat: curLat, lng: curLng },
+          { lat: target.latitude, lng: target.longitude },
         ],
-        {
-          color: '#10B981',
-          weight: 4,
-          dashArray: '6, 8',
-          opacity: 0.85,
-        }
-      );
-      layers.addLayer(routeLine);
+        map,
+        geodesic: true,
+        strokeColor: '#10B981',
+        strokeOpacity: 0.85,
+        strokeWeight: 4,
+        icons: [{
+          icon: { path: gmaps.SymbolPath.CIRCLE, scale: 3 },
+          offset: '0',
+          repeat: '12px',
+        }],
+      });
     }
-  }, [location, safePlaces, unsafeZones, filterMode, defaultLat, defaultLng, recommendedEscapeRoute]);
+  }, [location, safePlaces, unsafeZones, filterMode, mapReady, defaultLat, defaultLng, recommendedEscapeRoute]);
 
   const handleRecenter = () => {
-    if (mapInstanceRef.current) {
+    if (mapRef.current) {
       const curLat = location?.latitude || defaultLat;
       const curLng = location?.longitude || defaultLng;
-      mapInstanceRef.current.flyTo([curLat, curLng], 15, { duration: 1 });
+      mapRef.current.panTo({ lat: curLat, lng: curLng });
+      mapRef.current.setZoom(15);
     }
   };
 
   return (
     <div id="interactive-safe-map-container" className="rounded-[24px] bg-[#121124] border border-white/10 p-4 space-y-3.5 shadow-lg">
-      {/* Header with Title & Filter Buttons */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <div className="w-9 h-9 rounded-xl bg-[#5B4BDB]/20 text-[#A594FD] flex items-center justify-center">
@@ -234,7 +326,7 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
             <h4 className="text-sm font-black text-white uppercase tracking-wider flex items-center gap-2">
               Safe Havens & Danger Zones
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#5B4BDB]/30 text-[#D4CDFF] font-bold">
-                Phi-3.5 Evaluated
+                Google Maps
               </span>
             </h4>
             <p className="text-[11px] text-[#A6A2BC]">Real-time spatial risk & safe navigation escape corridors</p>
@@ -251,7 +343,6 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
         </button>
       </div>
 
-      {/* Filter Tabs */}
       <div className="flex items-center gap-1.5 p-1 rounded-xl bg-black/30 border border-white/5 text-[11px] font-bold">
         <button
           type="button"
@@ -270,7 +361,7 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
           }`}
         >
           <Shield className="w-3 h-3" />
-          Safe Havens ({safePlaces.length})
+          Safe ({safePlaces.length})
         </button>
         <button
           type="button"
@@ -280,45 +371,56 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
           }`}
         >
           <AlertTriangle className="w-3 h-3" />
-          Unsafe Places ({unsafeZones.length})
+          Unsafe ({unsafeZones.length})
         </button>
       </div>
 
-      {/* Leaflet Map Frame */}
       <div className="relative rounded-[20px] overflow-hidden border border-white/10 h-[280px] w-full bg-zinc-950">
-        <div ref={mapContainerRef} className="w-full h-full z-0" />
+        <div ref={mapContainerRef} className="w-full h-full" />
 
-        {/* Legend Overlay on Bottom Left */}
-        <div className="absolute bottom-2 left-2 z-10 bg-black/80 backdrop-blur-md px-2.5 py-1.5 rounded-lg border border-white/10 text-[10px] space-y-1">
-          <div className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#3B82F6] inline-block border border-white" />
-            <span className="text-white font-medium">Your Live Position</span>
+        {mapError && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center bg-[#0d1117]">
+            <AlertTriangle className="w-8 h-8 text-amber-500 mb-2" />
+            <p className="text-xs text-[#A6A2BC] leading-relaxed">{mapError}</p>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] inline-block" />
-            <span className="text-[#6EE7B7]">Safe Havens (Police/Hospital)</span>
+        )}
+
+        {!mapError && !mapReady && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[#0d1117]">
+            <div className="w-6 h-6 border-2 border-[#5B4BDB] border-t-transparent rounded-full animate-spin" />
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#EF4444] inline-block border border-dashed border-white" />
-            <span className="text-[#FCA5A5]">Unsafe / Risk Zones</span>
+        )}
+
+        {mapReady && (
+          <div className="absolute bottom-2 left-2 z-10 bg-black/80 backdrop-blur-md px-2.5 py-1.5 rounded-lg border border-white/10 text-[10px] space-y-1 pointer-events-none">
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#3B82F6] inline-block border border-white" />
+              <span className="text-white font-medium">Your Live Position</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] inline-block" />
+              <span className="text-[#6EE7B7]">Safe Havens (Police/Hospital)</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#EF4444] inline-block border border-dashed border-white" />
+              <span className="text-[#FCA5A5]">Unsafe / Risk Zones</span>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Recommended Escape Guidance Banner */}
       {recommendedEscapeRoute && (
         <div className="p-3 rounded-2xl bg-[#0F261E] border border-[#10B981]/30 flex items-start gap-2.5 text-xs text-[#D1FAE5]">
           <Shield className="w-4 h-4 text-[#34D399] shrink-0 mt-0.5" />
           <div className="space-y-0.5">
             <span className="font-extrabold text-[#34D399] uppercase tracking-wider block text-[10px]">
-              Phi-3.5 Recommended Safe Route
+              Recommended Safe Route
             </span>
             <p className="leading-snug">{recommendedEscapeRoute.guidanceStep}</p>
           </div>
         </div>
       )}
 
-      {/* Entity Details Popup Card if selected */}
       {selectedEntity && (
         <div className="p-3 rounded-2xl bg-[#1B1A33] border border-white/10 flex items-center justify-between text-xs animate-in fade-in">
           <div className="space-y-0.5">
@@ -343,7 +445,7 @@ export const InteractiveSafeMap: React.FC<InteractiveSafeMapProps> = ({
           </div>
 
           <a
-            href={`https://maps.google.com/?q=${selectedEntity.lat},${selectedEntity.lng}`}
+            href={`https://www.google.com/maps/dir/?api=1&destination=${selectedEntity.lat},${selectedEntity.lng}`}
             target="_blank"
             rel="noopener noreferrer"
             className="p-2 rounded-xl bg-white/10 hover:bg-white/15 text-white flex items-center gap-1 text-[11px] font-bold shrink-0 ml-2"
