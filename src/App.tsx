@@ -54,6 +54,8 @@ export const App: React.FC = () => {
 
   const [emergencyState, setEmergencyState] = useState<EmergencyState>(EmergencyState.IDLE);
   const [emergencySecondsLeft, setEmergencySecondsLeft] = useState<number>(120);
+  const emergencyEndTimeRef = useRef<number>(0);
+  const timerExpiredFiredRef = useRef<boolean>(false);
   const [isAccessibleSosPending, setIsAccessibleSosPending] = useState(false);
   const [accessibleDelayLeft, setAccessibleDelayLeft] = useState(5);
   const [activeEmergencyId, setActiveEmergencyId] = useState<string | null>(null);
@@ -443,18 +445,20 @@ export const App: React.FC = () => {
     setEmergencySecondsLeft(120);
     setIsAccessibleSosPending(false);
     setSentSmsReport(null);
+    timerExpiredFiredRef.current = false;
 
     startLocationTracking();
     startVoiceMonitoring();
 
-    const emergencyId = await emergencyService.createEmergency({
+    // DB record is created in the background — doesn't block the timer
+    emergencyService.createEmergency({
       state: 'EMERGENCY_ACTIVE',
       riskScore: 40,
       riskSeverity: 'HIGH',
       latitude: location?.latitude,
       longitude: location?.longitude,
-    });
-    setActiveEmergencyId(emergencyId);
+    }).then((id) => setActiveEmergencyId(id))
+      .catch((err) => console.warn('Failed to create emergency record (offline?):', err));
 
     addTimelineEvent(
       TimelineEventType.EMERGENCY_TRIGGERED,
@@ -474,7 +478,7 @@ export const App: React.FC = () => {
     stopLocationTracking();
 
     if (activeEmergencyId) {
-      await emergencyService.completeEmergency({
+      emergencyService.completeEmergency({
         id: activeEmergencyId,
         state: 'CANCELLED',
         riskScore,
@@ -482,7 +486,7 @@ export const App: React.FC = () => {
         latitude: location?.latitude,
         longitude: location?.longitude,
         evidenceCount: evidenceList.length,
-      });
+      }).catch((err) => console.warn('Failed to save cancellation (offline?):', err));
       setActiveEmergencyId(null);
     }
 
@@ -498,7 +502,11 @@ export const App: React.FC = () => {
   }, [addTimelineEvent, stopLocationTracking, stopVoiceMonitoring, activeEmergencyId, riskScore, riskSeverity, location, evidenceList.length]);
 
   const handleTimerExpired = useCallback(async () => {
+    if (timerExpiredFiredRef.current) return;
+    timerExpiredFiredRef.current = true;
+
     setEmergencyState(EmergencyState.COMPLETED);
+    setEmergencySecondsLeft(0);
     stopVoiceMonitoring();
     stopLocationTracking();
 
@@ -533,7 +541,7 @@ export const App: React.FC = () => {
     setSentSmsReport(smsMessage);
 
     if (activeEmergencyId) {
-      await emergencyService.completeEmergency({
+      emergencyService.completeEmergency({
         id: activeEmergencyId,
         state: 'COMPLETED',
         riskScore,
@@ -542,7 +550,7 @@ export const App: React.FC = () => {
         latitude: location?.latitude,
         longitude: location?.longitude,
         evidenceCount: evidenceList.length,
-      });
+      }).catch((err) => console.warn('Failed to save emergency record (offline?):', err));
       setActiveEmergencyId(null);
     }
 
@@ -577,22 +585,32 @@ export const App: React.FC = () => {
     activeEmergencyId,
   ]);
 
+  // Ref to always call the latest handleTimerExpired without restarting the interval
+  const handleTimerExpiredRef = useRef(handleTimerExpired);
+  handleTimerExpiredRef.current = handleTimerExpired;
+
   useEffect(() => {
     if (!isEmergencyActive) return;
 
-    const timer = setInterval(() => {
-      setEmergencySecondsLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(timer);
-          handleTimerExpired();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    // Use absolute end timestamp so the countdown is drift-free
+    // and never restarts even if component re-renders
+    emergencyEndTimeRef.current = Date.now() + 120 * 1000;
+    timerExpiredFiredRef.current = false;
+
+    const tick = () => {
+      const remaining = Math.max(0, Math.round((emergencyEndTimeRef.current - Date.now()) / 1000));
+      setEmergencySecondsLeft(remaining);
+      if (remaining <= 0) {
+        clearInterval(timer);
+        handleTimerExpiredRef.current();
+      }
+    };
+
+    tick();
+    const timer = setInterval(tick, 1000);
 
     return () => clearInterval(timer);
-  }, [isEmergencyActive, handleTimerExpired]);
+  }, [isEmergencyActive]);
 
   useEffect(() => {
     if (!isAccessibleSosPending) return;
