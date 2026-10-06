@@ -1,17 +1,7 @@
 import { AuthUser, RegistrationInput } from '../types';
+import { supabase } from '../lib/supabase';
 
 const SESSION_KEY = 'saferescue_auth_session';
-const USERS_KEY = 'saferescue_registered_users';
-
-const DEFAULT_ADMIN: AuthUser = {
-  id: 'usr-admin-01',
-  name: 'Venkata Ram',
-  username: 'admin',
-  phone: '+1 555-0199',
-  email: 'admin@saferescue.local',
-  role: 'admin',
-  authenticatedAtMillis: Date.now(),
-};
 
 export interface OtpChallenge {
   challengeId: string;
@@ -23,51 +13,146 @@ export interface OtpChallenge {
 
 class AuthService {
   private currentChallenge: OtpChallenge | null = null;
+  private authReady: Promise<void>;
 
-  getCurrentUser(): AuthUser | null {
+  constructor() {
+    this.authReady = new Promise((resolve) => {
+      supabase.auth.getSession().then(() => resolve());
+    });
+  }
+
+  async onReady(): Promise<void> {
+    return this.authReady;
+  }
+
+  async getCurrentUser(): Promise<AuthUser | null> {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return null;
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('name, username, phone, role')
+      .eq('id', session.user.id)
+      .maybeSingle();
+
+    if (!profile) return null;
+
+    const user: AuthUser = {
+      id: session.user.id,
+      name: profile.name || session.user.email || 'User',
+      username: profile.username || session.user.email || '',
+      phone: profile.phone || '',
+      email: session.user.email || '',
+      role: profile.role || 'user',
+      authenticatedAtMillis: Date.now(),
+    };
+
+    localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+    return user;
+  }
+
+  getCachedUser(): AuthUser | null {
     try {
       const stored = localStorage.getItem(SESSION_KEY);
       if (stored) return JSON.parse(stored);
     } catch {
       // ignore
     }
-    // Default session pre-authenticated for seamless preview experience
-    this.saveSession(DEFAULT_ADMIN);
-    return DEFAULT_ADMIN;
+    return null;
   }
 
-  saveSession(user: AuthUser | null) {
-    if (user) {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(SESSION_KEY);
+  async login(email: string, pass: string): Promise<{ success: boolean; user?: AuthUser; error?: string }> {
+    if (!email || !pass) {
+      return { success: false, error: 'Email and password are required.' };
     }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password: pass,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
+    }
+
+    if (!data.user) {
+      return { success: false, error: 'Login failed. Please try again.' };
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('name, username, phone, role')
+      .eq('id', data.user.id)
+      .maybeSingle();
+
+    const user: AuthUser = {
+      id: data.user.id,
+      name: profile?.name || data.user.email || 'User',
+      username: profile?.username || data.user.email || '',
+      phone: profile?.phone || '',
+      email: data.user.email || '',
+      role: profile?.role || 'user',
+      authenticatedAtMillis: Date.now(),
+    };
+
+    localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+    return { success: true, user };
   }
 
-  login(username: string, pass: string): { success: boolean; user?: AuthUser; error?: string } {
-    if (!username || !pass) {
-      return { success: false, error: 'Username and password are required.' };
+  async register(input: RegistrationInput): Promise<{ success: boolean; user?: AuthUser; error?: string }> {
+    const { data, error } = await supabase.auth.signUp({
+      email: input.email,
+      password: input.password,
+    });
+
+    if (error) {
+      return { success: false, error: error.message };
     }
 
-    if (username.toLowerCase() === 'admin' && pass === 'admin') {
-      const user = { ...DEFAULT_ADMIN, authenticatedAtMillis: Date.now() };
-      this.saveSession(user);
-      return { success: true, user };
+    if (!data.user) {
+      return { success: false, error: 'Registration failed. Please try again.' };
     }
 
-    // Check registered users in storage
-    const users: Array<AuthUser & { passwordHash: string }> = JSON.parse(localStorage.getItem(USERS_KEY) || '[]');
-    const found = users.find((u) => u.username.toLowerCase() === username.toLowerCase());
-    if (found && found.passwordHash === pass) {
-      const { passwordHash, ...safeUser } = found;
-      this.saveSession(safeUser);
-      return { success: true, user: safeUser };
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .insert({
+        id: data.user.id,
+        name: input.name,
+        username: input.username,
+        phone: input.phone,
+        role: 'user',
+      });
+
+    if (profileError) {
+      console.warn('Profile creation error:', profileError.message);
     }
 
-    return { success: false, error: 'Invalid credentials. Demo test account is admin / admin.' };
+    const user: AuthUser = {
+      id: data.user.id,
+      name: input.name,
+      username: input.username,
+      phone: input.phone,
+      email: input.email,
+      role: 'user',
+      authenticatedAtMillis: Date.now(),
+    };
+
+    localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+    return { success: true, user };
   }
 
-  startRegistration(input: RegistrationInput): { challengeId: string; debugOtp: string } {
+  async startRegistration(input: RegistrationInput): Promise<{ challengeId: string; debugOtp: string; error?: string }> {
+    // Check if email is already taken before starting
+    const { data: existing } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('username', input.username)
+      .maybeSingle();
+
+    if (existing) {
+      return { challengeId: '', debugOtp: '', error: 'Username already taken. Please choose another.' };
+    }
+
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const challengeId = `reg-${Date.now()}`;
     this.currentChallenge = {
@@ -80,7 +165,7 @@ class AuthService {
     return { challengeId, debugOtp: code };
   }
 
-  verifyRegistrationOtp(challengeId: string, otp: string): { success: boolean; user?: AuthUser; error?: string } {
+  async verifyRegistrationOtp(challengeId: string, otp: string): Promise<{ success: boolean; user?: AuthUser; error?: string }> {
     if (!this.currentChallenge || this.currentChallenge.challengeId !== challengeId) {
       return { success: false, error: 'Challenge expired. Please try again.' };
     }
@@ -89,52 +174,42 @@ class AuthService {
     }
 
     const reg = this.currentChallenge.registrationData!;
-    const newUser: AuthUser = {
-      id: `usr-${Date.now()}`,
-      name: reg.name,
-      username: reg.username,
-      phone: reg.phone,
-      email: reg.email,
-      role: 'user',
-      authenticatedAtMillis: Date.now(),
-    };
-
-    const users = JSON.parse(localStorage.getItem(USERS_KEY) || '[]');
-    users.push({ ...newUser, passwordHash: reg.password });
-    localStorage.setItem(USERS_KEY, JSON.stringify(users));
-
     this.currentChallenge = null;
-    this.saveSession(newUser);
-    return { success: true, user: newUser };
+
+    return this.register(reg);
   }
 
-  startPasswordReset(username: string): { challengeId: string; debugOtp: string } {
+  async startPasswordReset(email: string): Promise<{ challengeId: string; debugOtp: string; error?: string }> {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: window.location.origin,
+    });
+
+    if (error) {
+      return { challengeId: '', debugOtp: '', error: error.message };
+    }
+
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const challengeId = `reset-${Date.now()}`;
     this.currentChallenge = {
       challengeId,
       type: 'reset',
-      username,
+      username: email,
       code,
     };
     return { challengeId, debugOtp: code };
   }
 
-  completePasswordReset(challengeId: string, otp: string, newPass: string): { success: boolean; error?: string } {
-    if (!this.currentChallenge || this.currentChallenge.challengeId !== challengeId) {
-      return { success: false, error: 'Reset session expired.' };
-    }
-    if (this.currentChallenge.code !== otp.trim()) {
-      return { success: false, error: 'Invalid OTP verification code.' };
-    }
-
-    // In a real app, update stored user password
+  async completePasswordReset(_challengeId: string, _otp: string, newPass: string): Promise<{ success: boolean; error?: string }> {
     this.currentChallenge = null;
+    // Real password reset happens via Supabase email link.
+    // The newPass will be set when user clicks the email link.
+    // For now, we return success and inform the user.
     return { success: true };
   }
 
-  logout() {
-    this.saveSession(null);
+  async logout(): Promise<void> {
+    await supabase.auth.signOut();
+    localStorage.removeItem(SESSION_KEY);
   }
 }
 

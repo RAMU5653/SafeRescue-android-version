@@ -1,86 +1,98 @@
 import { TrustedContact } from '../types';
+import { supabase } from '../lib/supabase';
 
-const CONTACTS_KEY = 'saferescue_trusted_contacts';
+interface DbContact {
+  id: string;
+  user_id: string;
+  name: string;
+  phone: string;
+  relationship: string | null;
+  verified: boolean;
+  created_at: string;
+}
 
-const DEFAULT_CONTACTS: TrustedContact[] = [
-  {
-    id: 'contact-1',
-    name: 'Sarah Connor',
-    phone: '+1 555-0142',
-    verified: true,
-    relationship: 'Emergency Primary',
-    createdAtMillis: Date.now() - 86400000 * 5,
-  },
-  {
-    id: 'contact-2',
-    name: 'David Miller',
-    phone: '+1 555-0188',
-    verified: false,
-    relationship: 'Family',
-    createdAtMillis: Date.now() - 86400000 * 2,
-  },
-];
+function toTrustedContact(row: DbContact): TrustedContact {
+  return {
+    id: row.id,
+    name: row.name,
+    phone: row.phone,
+    verified: row.verified,
+    relationship: row.relationship || undefined,
+    createdAtMillis: new Date(row.created_at).getTime(),
+  };
+}
 
 class ContactsService {
-  getContacts(): TrustedContact[] {
-    try {
-      const stored = localStorage.getItem(CONTACTS_KEY);
-      if (stored) return JSON.parse(stored);
-    } catch {
-      // ignore
-    }
-    this.saveContacts(DEFAULT_CONTACTS);
-    return DEFAULT_CONTACTS;
-  }
+  async getContacts(): Promise<TrustedContact[]> {
+    const { data, error } = await supabase
+      .from('trusted_contacts')
+      .select('*')
+      .order('created_at', { ascending: true });
 
-  saveContacts(contacts: TrustedContact[]) {
-    localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
-  }
-
-  addOrUpdate(name: string, phone: string, id?: string): { success: boolean; contacts: TrustedContact[]; error?: string } {
-    const list = this.getContacts();
-    if (!id && list.length >= 3) {
-      return { success: false, contacts: list, error: 'Maximum of 3 trusted contacts allowed.' };
+    if (error) {
+      console.warn('Failed to load contacts:', error.message);
+      return [];
     }
 
+    return (data as DbContact[]).map(toTrustedContact);
+  }
+
+  async addOrUpdate(name: string, phone: string, id?: string): Promise<{ success: boolean; contacts: TrustedContact[]; error?: string }> {
     if (id) {
-      const idx = list.findIndex((c) => c.id === id);
-      if (idx >= 0) {
-        list[idx] = {
-          ...list[idx],
+      const { error } = await supabase
+        .from('trusted_contacts')
+        .update({
           name: name.trim(),
           phone: phone.trim(),
-          verified: false, // Reset verification on edit per Android spec
-        };
+          verified: false,
+        })
+        .eq('id', id);
+
+      if (error) {
+        return { success: false, contacts: [], error: error.message };
       }
     } else {
-      list.push({
-        id: `contact-${Date.now()}`,
-        name: name.trim(),
-        phone: phone.trim(),
-        verified: false,
-        createdAtMillis: Date.now(),
-      });
+      const existing = await this.getContacts();
+      if (existing.length >= 3) {
+        return { success: false, contacts: existing, error: 'Maximum of 3 trusted contacts allowed.' };
+      }
+
+      const { error } = await supabase
+        .from('trusted_contacts')
+        .insert({
+          name: name.trim(),
+          phone: phone.trim(),
+          verified: false,
+        });
+
+      if (error) {
+        return { success: false, contacts: existing, error: error.message };
+      }
     }
 
-    this.saveContacts(list);
-    return { success: true, contacts: list };
+    const contacts = await this.getContacts();
+    return { success: true, contacts };
   }
 
-  toggleVerified(id: string): TrustedContact[] {
-    const list = this.getContacts();
-    const target = list.find((c) => c.id === id);
+  async toggleVerified(id: string): Promise<TrustedContact[]> {
+    const contacts = await this.getContacts();
+    const target = contacts.find((c) => c.id === id);
     if (target) {
-      target.verified = !target.verified;
-      this.saveContacts(list);
+      await supabase
+        .from('trusted_contacts')
+        .update({ verified: !target.verified })
+        .eq('id', id);
     }
-    return [...list];
+    return this.getContacts();
   }
 
-  remove(id: string): TrustedContact[] {
-    const list = this.getContacts().filter((c) => c.id !== id);
-    this.saveContacts(list);
-    return list;
+  async remove(id: string): Promise<TrustedContact[]> {
+    await supabase
+      .from('trusted_contacts')
+      .delete()
+      .eq('id', id);
+
+    return this.getContacts();
   }
 }
 

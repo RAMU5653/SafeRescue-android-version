@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   FileText,
   Download,
@@ -13,7 +13,7 @@ import {
   Send,
   UserCheck,
 } from 'lucide-react';
-import { EvidenceCapture, IncidentReport, LocationPoint, RiskSeverity, TimelineEvent } from '../types';
+import { EvidenceCapture, IncidentReport, LocationPoint, RiskSeverity, TimelineEvent, TrustedContact } from '../types';
 import { generateIncidentPdf } from '../services/reportService';
 import {
   buildWhatsAppEmergencyMessage,
@@ -48,8 +48,11 @@ export const EvidenceTab: React.FC<EvidenceTabProps> = ({
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [downloadSuccess, setDownloadSuccess] = useState<string | null>(null);
   const [whatsAppSuccess, setWhatsAppSuccess] = useState<string | null>(null);
+  const [contacts, setContacts] = useState<TrustedContact[]>([]);
 
-  const contacts = contactsService.getContacts();
+  useEffect(() => {
+    contactsService.getContacts().then(setContacts);
+  }, []);
 
   const handleShareAllWhatsApp = () => {
     const msg = buildWhatsAppEmergencyMessage({

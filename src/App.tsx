@@ -23,6 +23,9 @@ import { riskEngine } from './services/riskEngine';
 import { localAiEngine } from './services/localAiEngine';
 import { fetchNearbySafePlaces } from './services/safetyService';
 import { computeSha256 } from './services/hashService';
+import { timelineService } from './services/timelineService';
+import { emergencyService } from './services/emergencyService';
+import { supabase } from './lib/supabase';
 import { Header } from './components/Header';
 import { StatusCard } from './components/StatusCard';
 import { SosHoldCard } from './components/SosHoldCard';
@@ -38,45 +41,41 @@ import { SendRealMessageModal } from './components/SendRealMessageModal';
 import { AuthView } from './components/AuthScreen';
 import { LocalAiDualEngineCard } from './components/LocalAiDualEngineCard';
 import { InteractiveSafeMap } from './components/InteractiveSafeMap';
-import { Bell, ShieldAlert, X, CheckCircle2, Send, MessageSquare } from 'lucide-react';
+import { Bell, ShieldAlert, X, CheckCircle2, Send, MessageSquare, Loader2 } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => authService.getCurrentUser());
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
   const [currentTab, setCurrentTab] = useState<HomeTab>(HomeTab.HOME);
 
-  // Real Message Dispatch Modal State
   const [isRealMessageModalOpen, setIsRealMessageModalOpen] = useState(false);
   const [realMessageInitialContact, setRealMessageInitialContact] = useState<TrustedContact | null>(null);
   const [realMessageMode, setRealMessageMode] = useState<'emergency' | 'test'>('emergency');
 
-  // Emergency Subsystem State
   const [emergencyState, setEmergencyState] = useState<EmergencyState>(EmergencyState.IDLE);
-  const [emergencySecondsLeft, setEmergencySecondsLeft] = useState<number>(120); // 2 minutes
+  const [emergencySecondsLeft, setEmergencySecondsLeft] = useState<number>(120);
   const [isAccessibleSosPending, setIsAccessibleSosPending] = useState(false);
   const [accessibleDelayLeft, setAccessibleDelayLeft] = useState(5);
+  const [activeEmergencyId, setActiveEmergencyId] = useState<string | null>(null);
 
-  // Location Subsystem State
   const [locationStatus, setLocationStatus] = useState<LocationStatus>(LocationStatus.INACTIVE);
   const [location, setLocation] = useState<LocationPoint | null>(null);
 
-  // Voice Pipeline State
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>(VoiceStatus.INACTIVE);
   const [voiceMetrics, setVoiceMetrics] = useState<VoiceSignalMetrics | null>(null);
   const [voiceMessage, setVoiceMessage] = useState<string | null>(null);
 
-  // Risk Engine State
   const [riskScore, setRiskScore] = useState<number>(0);
   const [riskSeverity, setRiskSeverity] = useState<RiskSeverity>(RiskSeverity.LOW);
   const [riskFactors, setRiskFactors] = useState<RiskFactor[]>([]);
 
-  // Evidence & Timeline
   const [evidenceList, setEvidenceList] = useState<EvidenceCapture[]>([]);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [toastNotification, setToastNotification] = useState<string | null>(null);
   const [sentSmsReport, setSentSmsReport] = useState<string | null>(null);
+  const [contacts, setContacts] = useState<TrustedContact[]>([]);
 
-  // Dual Local AI Models State (Qwen 2.5 1.5B/3B & Phi-3.5 Mini 3.8B)
   const [qwenVariant, setQwenVariant] = useState<'Qwen 2.5 1.5B' | 'Qwen 2.5 3B'>('Qwen 2.5 3B');
   const [safePlaces, setSafePlaces] = useState<SafetyPlace[]>([]);
   const [qwenAnalysis, setQwenAnalysis] = useState<QwenContextAnalysis>(() =>
@@ -109,26 +108,69 @@ export const App: React.FC = () => {
   );
 
   const hasAutoCapturedRef = useRef(false);
-
-  // Audio refs
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioAnimRef = useRef<number | null>(null);
   const geoWatchIdRef = useRef<number | null>(null);
 
-  const addTimelineEvent = useCallback((type: TimelineEventType, title: string, detail: string, score?: number) => {
-    const newEvent: TimelineEvent = {
-      id: `evt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      timestampMillis: Date.now(),
-      type,
-      title,
-      detail,
-      riskScore: score,
+  // Check auth state on mount
+  useEffect(() => {
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        const user = await authService.getCurrentUser();
+        if (user) {
+          setCurrentUser(user);
+          setAuthChecking(false);
+          return;
+        }
+      }
+      setAuthChecking(false);
+    })();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      (async () => {
+        if (!session?.user) {
+          setCurrentUser(null);
+        }
+      })();
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
     };
-    setTimeline((prev) => [newEvent, ...prev]);
   }, []);
 
-  // Recalculate Risk Engine
+  // Load timeline and contacts when user is authenticated
+  useEffect(() => {
+    if (!currentUser) return;
+    (async () => {
+      const [loadedTimeline, loadedContacts] = await Promise.all([
+        timelineService.loadTimeline(),
+        contactsService.getContacts(),
+      ]);
+      setTimeline(loadedTimeline);
+      setContacts(loadedContacts);
+    })();
+  }, [currentUser]);
+
+  const addTimelineEvent = useCallback(async (type: TimelineEventType, title: string, detail: string, score?: number) => {
+    const saved = await timelineService.addEvent(type, title, detail, score);
+    if (saved) {
+      setTimeline((prev) => [saved, ...prev]);
+    } else {
+      const newEvent: TimelineEvent = {
+        id: `evt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        timestampMillis: Date.now(),
+        type,
+        title,
+        detail,
+        riskScore: score,
+      };
+      setTimeline((prev) => [newEvent, ...prev]);
+    }
+  }, []);
+
   const isEmergencyActive =
     emergencyState === EmergencyState.EMERGENCY_ACTIVE ||
     emergencyState === EmergencyState.MONITORING ||
@@ -147,7 +189,6 @@ export const App: React.FC = () => {
     setRiskFactors(evalResult.factors);
   }, [isEmergencyActive, locationStatus, location, voiceMetrics, voiceStatus]);
 
-  // Fetch nearby safe places when location is available
   useEffect(() => {
     if (location) {
       fetchNearbySafePlaces(location)
@@ -156,7 +197,6 @@ export const App: React.FC = () => {
     }
   }, [location]);
 
-  // Autonomous Evidence Capture (Powered by Phi-3.5 Mini 3.8B)
   const triggerAutonomousCapture = useCallback(async () => {
     try {
       const now = Date.now();
@@ -208,14 +248,13 @@ export const App: React.FC = () => {
         `Phi-3.5 Mini 3.8B autonomously evaluated threat level and captured cryptographic photographic evidence [SHA-256: ${hash.slice(0, 10)}...] without manual victim touch.`,
         45
       );
-      setToastNotification('📸 Phi-3.5 Mini autonomously captured & sealed evidence photo!');
+      setToastNotification('Phi-3.5 Mini autonomously captured & sealed evidence photo!');
       setTimeout(() => setToastNotification(null), 3500);
     } catch (err) {
       console.error('Autonomous capture error:', err);
     }
   }, [addTimelineEvent, location, voiceMetrics]);
 
-  // Continuous Dual-Model Reasoning Pipeline (Qwen 2.5 & Phi-3.5 Mini)
   useEffect(() => {
     localAiEngine.setQwenVariant(qwenVariant);
     const contextInputs = {
@@ -246,7 +285,6 @@ export const App: React.FC = () => {
     safePlaces,
   ]);
 
-  // Autonomous trigger by Phi-3.5 Mini during emergency
   useEffect(() => {
     if (
       isEmergencyActive &&
@@ -267,7 +305,6 @@ export const App: React.FC = () => {
     triggerAutonomousCapture,
   ]);
 
-  // Handle Location tracking
   const startLocationTracking = useCallback(() => {
     if (!('geolocation' in navigator)) {
       setLocationStatus(LocationStatus.UNAVAILABLE);
@@ -294,7 +331,6 @@ export const App: React.FC = () => {
       if (err.code === err.PERMISSION_DENIED) {
         setLocationStatus(LocationStatus.PERMISSION_REQUIRED);
       } else {
-        // Fallback default coordinates so safety places & risk engine can still demonstrate functionality
         const fallbackPoint: LocationPoint = {
           latitude: 37.7749,
           longitude: -122.4194,
@@ -325,7 +361,6 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Handle Audio Voice Monitoring
   const startVoiceMonitoring = useCallback(async () => {
     try {
       setVoiceStatus(VoiceStatus.LISTENING);
@@ -403,8 +438,7 @@ export const App: React.FC = () => {
     setVoiceStatus(VoiceStatus.STOPPED);
   }, []);
 
-  // Trigger Emergency
-  const triggerSos = useCallback(() => {
+  const triggerSos = useCallback(async () => {
     setEmergencyState(EmergencyState.EMERGENCY_ACTIVE);
     setEmergencySecondsLeft(120);
     setIsAccessibleSosPending(false);
@@ -412,6 +446,15 @@ export const App: React.FC = () => {
 
     startLocationTracking();
     startVoiceMonitoring();
+
+    const emergencyId = await emergencyService.createEmergency({
+      state: 'EMERGENCY_ACTIVE',
+      riskScore: 40,
+      riskSeverity: 'HIGH',
+      latitude: location?.latitude,
+      longitude: location?.longitude,
+    });
+    setActiveEmergencyId(emergencyId);
 
     addTimelineEvent(
       TimelineEventType.EMERGENCY_TRIGGERED,
@@ -422,14 +465,26 @@ export const App: React.FC = () => {
 
     setToastNotification('EMERGENCY ACTIVE: Manual SOS triggered with highest priority.');
     setTimeout(() => setToastNotification(null), 5000);
-  }, [addTimelineEvent, startLocationTracking, startVoiceMonitoring]);
+  }, [addTimelineEvent, startLocationTracking, startVoiceMonitoring, location]);
 
-  // Cancel Emergency
-  const cancelSos = useCallback(() => {
+  const cancelSos = useCallback(async () => {
     setEmergencyState(EmergencyState.CANCELLED);
     setSentSmsReport(null);
     stopVoiceMonitoring();
     stopLocationTracking();
+
+    if (activeEmergencyId) {
+      await emergencyService.completeEmergency({
+        id: activeEmergencyId,
+        state: 'CANCELLED',
+        riskScore,
+        riskSeverity,
+        latitude: location?.latitude,
+        longitude: location?.longitude,
+        evidenceCount: evidenceList.length,
+      });
+      setActiveEmergencyId(null);
+    }
 
     addTimelineEvent(
       TimelineEventType.EMERGENCY_CANCELLED,
@@ -440,37 +495,32 @@ export const App: React.FC = () => {
     setTimeout(() => {
       setEmergencyState(EmergencyState.IDLE);
     }, 2500);
-  }, [addTimelineEvent, stopLocationTracking, stopVoiceMonitoring]);
+  }, [addTimelineEvent, stopLocationTracking, stopVoiceMonitoring, activeEmergencyId, riskScore, riskSeverity, location, evidenceList.length]);
 
-  // Handle 2-minute timer expiration (Automated Emergency SMS dispatch)
-  const handleTimerExpired = useCallback(() => {
+  const handleTimerExpired = useCallback(async () => {
     setEmergencyState(EmergencyState.COMPLETED);
     stopVoiceMonitoring();
     stopLocationTracking();
 
-    const contacts = contactsService.getContacts();
-    const contactNames = contacts.map((c) => `${c.name} (${c.phone})`).join(', ');
+    const loadedContacts = await contactsService.getContacts();
+    const contactNames = loadedContacts.map((c) => `${c.name} (${c.phone})`).join(', ');
 
-    const victimName = currentUser?.name || 'Venkata Ram';
-    const victimPhone = currentUser?.phone || '+1 555-0199';
+    const victimName = currentUser?.name || 'SafeRescue User';
+    const victimPhone = currentUser?.phone || '';
 
-    // 1. Live GPS Coordinates
     const locCoords = location
       ? `https://maps.google.com/?q=${location.latitude},${location.longitude} (${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}${location.accuracyMeters ? ` ±${Math.round(location.accuracyMeters)}m` : ''})`
       : 'GPS coordinates currently acquiring/unavailable';
 
-    // 2. AI Incident Explanation ("What Happened" synthesized by Phi-3.5 Mini 3.8B)
     const aiSummary =
       phiAnalysis.whatHappenedNarrative ||
       `Emergency SOS triggered via 5s safety hold. Risk evaluated at ${riskSeverity} (${riskScore}/100). 2-minute safety countdown elapsed without cancellation.`;
 
-    // 3. Secured Evidences
     const evidenceHashes = evidenceList.map((e) => e.sha256Hash.slice(0, 8) + '...').slice(0, 2);
     const evidenceSummary = evidenceList.length > 0
       ? `${evidenceList.length} secured photo(s) sealed with SHA-256 [SHA: ${evidenceHashes.join(', ')}]`
       : '0 photos captured';
 
-    // 4. Complete Structured SMS Message
     const smsMessage = [
       '🚨 SafeRescue CRITICAL SOS ALERT (2-Min Safety Timer Expired)',
       `👤 Victim: ${victimName} (Tel: ${victimPhone})`,
@@ -482,20 +532,33 @@ export const App: React.FC = () => {
 
     setSentSmsReport(smsMessage);
 
+    if (activeEmergencyId) {
+      await emergencyService.completeEmergency({
+        id: activeEmergencyId,
+        state: 'COMPLETED',
+        riskScore,
+        riskSeverity,
+        smsReport: smsMessage,
+        latitude: location?.latitude,
+        longitude: location?.longitude,
+        evidenceCount: evidenceList.length,
+      });
+      setActiveEmergencyId(null);
+    }
+
     addTimelineEvent(
       TimelineEventType.CONFIRMED_INCIDENT,
       '2-Min Timer Expired: Emergency SMS Sent',
-      `2-minute safety timer expired without cancellation. Automatically dispatched emergency SMS alert with victim identity (${victimName}), live GPS coordinates, AI summary, and ${evidenceList.length} evidence photo(s) to ${contacts.length} trusted contact(s): ${contactNames}.\n\nFull SMS Sent:\n${smsMessage}`,
+      `2-minute safety timer expired without cancellation. Automatically dispatched emergency SMS alert with victim identity (${victimName}), live GPS coordinates, AI summary, and ${evidenceList.length} evidence photo(s) to ${loadedContacts.length} trusted contact(s): ${contactNames}.\n\nFull SMS Sent:\n${smsMessage}`,
       50
     );
 
     setToastNotification(
-      `🚨 2-MIN TIMER EXPIRED: Emergency SMS dispatched with victim info, GPS, AI summary & ${evidenceList.length} evidence photo(s) to ${contacts.length} trusted contacts!`
+      `🚨 2-MIN TIMER EXPIRED: Emergency SMS dispatched with victim info, GPS, AI summary & ${evidenceList.length} evidence photo(s) to ${loadedContacts.length} trusted contacts!`
     );
 
-    // If on mobile device, offer native SMS URI dispatch as direct backup
-    if (contacts.length > 0 && typeof window !== 'undefined') {
-      const phones = contacts.map((c) => c.phone).join(',');
+    if (loadedContacts.length > 0 && typeof window !== 'undefined') {
+      const phones = loadedContacts.map((c) => c.phone).join(',');
       const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
       if (isMobile) {
         window.location.href = `sms:${phones}?body=${encodeURIComponent(smsMessage)}`;
@@ -511,9 +574,9 @@ export const App: React.FC = () => {
     riskSeverity,
     stopLocationTracking,
     stopVoiceMonitoring,
+    activeEmergencyId,
   ]);
 
-  // Countdown timer for active emergency
   useEffect(() => {
     if (!isEmergencyActive) return;
 
@@ -531,7 +594,6 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [isEmergencyActive, handleTimerExpired]);
 
-  // Accessible 5s countdown
   useEffect(() => {
     if (!isAccessibleSosPending) return;
 
@@ -549,7 +611,6 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [isAccessibleSosPending, triggerSos]);
 
-  // Initial location probe on mount for safe places guidance
   useEffect(() => {
     if (locationStatus === LocationStatus.INACTIVE) {
       startLocationTracking();
@@ -566,15 +627,22 @@ export const App: React.FC = () => {
     );
   };
 
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-[#050D20] text-white flex flex-col items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-[#5B4BDB] mb-3" />
+        <p className="text-sm text-[#8E9BB6]">Loading SafeRescue...</p>
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return <AuthView onAuthSuccess={(user) => setCurrentUser(user)} />;
   }
 
   return (
     <div className="min-h-screen bg-[#050D20] text-white flex flex-col items-center">
-      {/* Container wrapper constrained for mobile & desktop */}
       <div className="w-full max-w-md min-h-screen flex flex-col justify-between px-4">
-        {/* Header */}
         <div>
           <Header
             user={currentUser}
@@ -582,7 +650,6 @@ export const App: React.FC = () => {
             onProfileClick={() => setCurrentTab(HomeTab.ME)}
           />
 
-          {/* Toast Notification Banner */}
           {toastNotification && (
             <div className="my-2 p-3 rounded-2xl bg-[#E51E4D] text-white text-xs font-bold flex items-center justify-between shadow-lg shadow-[#E51E4D]/30 animate-in fade-in slide-in-from-top-2">
               <div className="flex items-center gap-2">
@@ -599,15 +666,11 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          {/* Tab Content Rendering */}
           <main className="mt-4 pb-20">
-            {/* TAB: HOME */}
             {currentTab === HomeTab.HOME && (
               <div className="space-y-4">
-                {/* 1. Emergency Status Card */}
                 <StatusCard state={emergencyState} />
 
-                {/* Dispatched Emergency SMS Payload Card */}
                 {sentSmsReport && (
                   <div
                     id="dispatched-sms-report-card"
@@ -633,10 +696,10 @@ export const App: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => {
-                          const contacts = contactsService.getContacts();
-                          if (contacts.length > 0) {
-                            const phones = contacts.map((c) => c.phone).join(',');
+                        onClick={async () => {
+                          const loadedContacts = await contactsService.getContacts();
+                          if (loadedContacts.length > 0) {
+                            const phones = loadedContacts.map((c) => c.phone).join(',');
                             window.location.href = `sms:${phones}?body=${encodeURIComponent(sentSmsReport)}`;
                           }
                         }}
@@ -660,7 +723,6 @@ export const App: React.FC = () => {
                   </div>
                 )}
 
-                {/* 2. SOS Control or Active Emergency Card */}
                 {isEmergencyActive ? (
                   <ActiveEmergencyCard
                     remainingSeconds={emergencySecondsLeft}
@@ -694,7 +756,6 @@ export const App: React.FC = () => {
                   />
                 )}
 
-                {/* 3. Real-Time Risk Assessment Card */}
                 <RiskCard
                   active={isEmergencyActive}
                   score={riskScore}
@@ -702,7 +763,6 @@ export const App: React.FC = () => {
                   factors={riskFactors}
                 />
 
-                {/* 4. Dual Local AI Reasoning Pipeline (Qwen 2.5 & Phi-3.5 Mini) */}
                 <LocalAiDualEngineCard
                   qwenAnalysis={qwenAnalysis}
                   phiAnalysis={phiAnalysis}
@@ -711,7 +771,6 @@ export const App: React.FC = () => {
                   evidenceCount={evidenceList.length}
                 />
 
-                {/* 5. Safe Havens & Danger Zones Map (Evaluated by Phi-3.5 Mini) */}
                 <InteractiveSafeMap
                   location={location}
                   safePlaces={safePlaces}
@@ -719,7 +778,6 @@ export const App: React.FC = () => {
                   recommendedEscapeRoute={phiAnalysis.recommendedEscapeRoute}
                 />
 
-                {/* 6. Safety Controls Feature Grid */}
                 <FeatureGrid
                   emergencyState={emergencyState}
                   locationStatus={locationStatus}
@@ -735,7 +793,6 @@ export const App: React.FC = () => {
               </div>
             )}
 
-            {/* TAB: SAFETY */}
             {currentTab === HomeTab.SAFETY && (
               <SafetyTab
                 latestLocation={location}
@@ -748,7 +805,6 @@ export const App: React.FC = () => {
               />
             )}
 
-            {/* TAB: EVIDENCE */}
             {currentTab === HomeTab.EVIDENCE && (
               <EvidenceTab
                 timeline={timeline}
@@ -756,15 +812,16 @@ export const App: React.FC = () => {
                 latestLocation={location}
                 riskScore={riskScore}
                 riskSeverity={riskSeverity}
+                victimName={currentUser?.name}
+                victimPhone={currentUser?.phone}
               />
             )}
 
-            {/* TAB: ME */}
             {currentTab === HomeTab.ME && (
               <MeTab
                 user={currentUser}
-                onLogout={() => {
-                  authService.logout();
+                onLogout={async () => {
+                  await authService.logout();
                   setCurrentUser(null);
                 }}
               />
@@ -772,25 +829,22 @@ export const App: React.FC = () => {
           </main>
         </div>
 
-        {/* Bottom Navigation */}
         <BottomNav
           currentTab={currentTab}
           onTabSelect={(tab) => setCurrentTab(tab)}
           isEmergencyActive={isEmergencyActive}
         />
 
-        {/* Camera Modal */}
         <CameraModal
           isOpen={isCameraOpen}
           onClose={() => setIsCameraOpen(false)}
           onCaptureSaved={handleCaptureSaved}
         />
 
-        {/* Send Real Message Modal */}
         <SendRealMessageModal
           isOpen={isRealMessageModalOpen}
           onClose={() => setIsRealMessageModalOpen(false)}
-          contacts={contactsService.getContacts()}
+          contacts={contacts}
           location={location}
           victimName={currentUser?.name}
           victimPhone={currentUser?.phone}

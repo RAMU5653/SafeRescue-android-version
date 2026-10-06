@@ -4,16 +4,13 @@ import {
   UserPlus,
   Edit2,
   Trash2,
-  CheckCircle,
   Bell,
   Navigation,
   RefreshCw,
   Sun,
   Shield,
-  Activity,
-  PhoneCall,
-  Send,
   MessageSquare,
+  Send,
 } from 'lucide-react';
 import { LocationPoint, SafetyPlace, TrustedContact, WeatherCondition } from '../types';
 import { contactsService } from '../services/contactsService';
@@ -38,16 +35,21 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
   const [formName, setFormName] = useState('');
   const [formPhone, setFormPhone] = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState<TrustedContact | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  // Safety guidance state
   const [places, setPlaces] = useState<SafetyPlace[]>([]);
   const [weather, setWeather] = useState<WeatherCondition | null>(null);
   const [loadingGuidance, setLoadingGuidance] = useState(false);
   const [guidanceError, setGuidanceError] = useState<string | null>(null);
 
-  useEffect(() => {
-    setContacts(contactsService.getContacts());
+  const loadContacts = useCallback(async () => {
+    const list = await contactsService.getContacts();
+    setContacts(list);
   }, []);
+
+  useEffect(() => {
+    loadContacts();
+  }, [loadContacts]);
 
   const loadGuidance = useCallback(async () => {
     if (!latestLocation) return;
@@ -88,25 +90,29 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
     setIsEditorOpen(true);
   };
 
-  const handleSaveContact = (e: React.FormEvent) => {
+  const handleSaveContact = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim() || !formPhone.trim()) return;
 
-    const res = contactsService.addOrUpdate(formName, formPhone, editingContact?.id);
+    setSaving(true);
+    const res = await contactsService.addOrUpdate(formName, formPhone, editingContact?.id);
+    setSaving(false);
     if (res.success) {
       setContacts(res.contacts);
       setIsEditorOpen(false);
+    } else {
+      onShowAlertNotification(res.error || 'Failed to save contact');
     }
   };
 
-  const handleToggleVerified = (id: string) => {
-    const updated = contactsService.toggleVerified(id);
+  const handleToggleVerified = async (id: string) => {
+    const updated = await contactsService.toggleVerified(id);
     setContacts(updated);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!deleteConfirm) return;
-    const updated = contactsService.remove(deleteConfirm.id);
+    const updated = await contactsService.remove(deleteConfirm.id);
     setContacts(updated);
     setDeleteConfirm(null);
   };
@@ -116,20 +122,13 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
       onOpenSendMessageModal(contact, 'test');
     } else {
       onShowAlertNotification(
-        `TEST ALERT: SafeRescue simulated emergency ping sent to ${contact.name} (${maskPhone(
-          contact.phone
-        )}).`
+        `TEST ALERT: SafeRescue simulated emergency ping sent to ${contact.name} (${contact.phone}).`
       );
     }
   };
 
-  const maskPhone = (phone: string) => {
-    return phone;
-  };
-
   return (
     <div className="space-y-4 pb-20">
-      {/* Title */}
       <div>
         <h2 className="text-2xl font-extrabold text-white">Trusted Contacts</h2>
         <p className="text-xs text-[#8E9BB6] mt-0.5">
@@ -137,7 +136,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
         </p>
       </div>
 
-      {/* Real Message Trigger Banner */}
       <div className="rounded-[20px] p-4 bg-gradient-to-r from-[#20102B] to-[#121936] border border-[#5B4BDB]/40 text-white shadow-md flex items-center justify-between">
         <div>
           <h4 className="font-bold text-sm text-white flex items-center gap-1.5">
@@ -157,7 +155,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
         </button>
       </div>
 
-      {/* Contacts Summary Card */}
       <div className="rounded-[20px] p-4 bg-white text-[#17172A] shadow-md">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -167,7 +164,7 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
             <div>
               <h4 className="font-bold text-sm text-[#222236]">{contacts.length}/3 Configured</h4>
               <p className="text-xs text-[#777788]">
-                Tap Edit to change phone numbers to your real mobile contacts.
+                Contacts are saved to your secure account and sync across devices.
               </p>
             </div>
           </div>
@@ -185,7 +182,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
         </div>
       </div>
 
-      {/* Contacts List */}
       <div className="space-y-2.5">
         {contacts.map((contact) => (
           <div
@@ -223,7 +219,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
               </div>
             </div>
 
-            {/* Action buttons */}
             <div className="flex items-center justify-between pt-1 border-t border-zinc-100">
               <div className="flex items-center gap-2">
                 <button
@@ -269,14 +264,12 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
             <Users className="w-8 h-8 text-[#55D7FF] mx-auto opacity-70" />
             <h5 className="font-bold text-sm">No Trusted Contacts Yet</h5>
             <p className="text-xs text-[#B8C4D9]">
-              Add up to 3 people you trust. Keep their phone numbers current before using the
-              emergency workflow.
+              Add up to 3 people you trust. Their info is saved securely to your account.
             </p>
           </div>
         )}
       </div>
 
-      {/* Safety Guidance Card (Phase 16 - OpenStreetMap + Open-Meteo) */}
       <div className="rounded-[20px] p-4 bg-white text-[#17172A] shadow-md space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -285,7 +278,7 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
             </div>
             <div>
               <h4 className="font-bold text-sm text-[#222236]">Nearby Safety Guidance</h4>
-              <p className="text-xs text-[#777788]">Phase 16 • Live mapped places + weather</p>
+              <p className="text-xs text-[#777788]">Live mapped places + weather</p>
             </div>
           </div>
 
@@ -303,11 +296,10 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
 
         <p className="text-[11px] text-[#777788] leading-relaxed">
           {latestLocation
-            ? 'Uses your latest location fix. Coordinates sent securely via HTTPS to OpenStreetMap Overpass and Open-Meteo. Not a certified emergency dispatch endpoint.'
+            ? 'Uses your latest location fix. Coordinates sent securely via HTTPS to OpenStreetMap Overpass and Open-Meteo.'
             : 'No current GPS fix available. Start an SOS or grant browser location access to view live safe places.'}
         </p>
 
-        {/* Live Weather Snapshot */}
         {weather && (
           <div className="rounded-xl p-3 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2">
@@ -322,7 +314,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
           </div>
         )}
 
-        {/* Live Interactive Safe & Unsafe Map */}
         <InteractiveSafeMap
           location={latestLocation}
           safePlaces={places}
@@ -339,7 +330,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
           }
         />
 
-        {/* Places List */}
         {places.length > 0 && (
           <div className="space-y-1.5 pt-1">
             <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-500">
@@ -386,7 +376,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
         {guidanceError && <p className="text-xs text-rose-600">{guidanceError}</p>}
       </div>
 
-      {/* Notifications Configuration Card */}
       <div className="rounded-[20px] p-4 bg-white text-[#17172A] shadow-md space-y-2">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-full bg-[#F1EFFF] flex items-center justify-center text-[#5B4BDB]">
@@ -402,14 +391,13 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
         </p>
       </div>
 
-      {/* Phase Roadmap Capabilities */}
       <div className="space-y-2 pt-2">
         <h4 className="text-sm font-bold text-white">Emergency Subsystem Status</h4>
         {[
-          { title: 'Emergency Access & Countdown', status: 'Active (Phase 5)' },
-          { title: 'Safe Places & Live Weather', status: 'Active (Phase 16)' },
-          { title: 'LoRa Gateway Bridge', status: 'Gateway Protocol Defined (Phase 17)' },
-          { title: 'Local AI Voice Distress Classifier', status: 'Model Slot Ready (Phase 18)' },
+          { title: 'Emergency Access & Countdown', status: 'Active' },
+          { title: 'Safe Places & Live Weather', status: 'Active' },
+          { title: 'Real Database Sync', status: 'Active' },
+          { title: 'Trusted Contacts Cloud Storage', status: 'Active' },
         ].map((item, idx) => (
           <div
             key={idx}
@@ -424,7 +412,6 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
         ))}
       </div>
 
-      {/* Add / Edit Contact Modal */}
       {isEditorOpen && (
         <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
           <div className="w-full max-w-sm rounded-[24px] bg-white text-[#17172A] p-5 shadow-2xl space-y-4">
@@ -459,7 +446,7 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
               </div>
 
               <p className="text-[11px] text-zinc-500">
-                Saving changes resets the local verification flag.
+                Saving changes resets the verification flag.
               </p>
 
               <div className="flex items-center justify-end gap-2 pt-2">
@@ -472,9 +459,10 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#5B4BDB] text-white hover:bg-[#4838c4]"
+                  disabled={saving}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#5B4BDB] text-white hover:bg-[#4838c4] disabled:opacity-60"
                 >
-                  Save Contact
+                  {saving ? 'Saving...' : 'Save Contact'}
                 </button>
               </div>
             </form>
@@ -482,14 +470,13 @@ export const SafetyTab: React.FC<SafetyTabProps> = ({
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
       {deleteConfirm && (
         <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
           <div className="w-full max-w-sm rounded-[24px] bg-white text-[#17172A] p-5 shadow-2xl space-y-3">
             <h3 className="font-bold text-base">Remove Trusted Contact?</h3>
             <p className="text-xs text-zinc-600 leading-relaxed">
               Are you sure you want to remove <span className="font-bold">{deleteConfirm.name}</span>{' '}
-              from this device&apos;s trusted contact list?
+              from your trusted contact list?
             </p>
             <div className="flex items-center justify-end gap-2 pt-3">
               <button
